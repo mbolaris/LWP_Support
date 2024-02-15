@@ -1,10 +1,14 @@
 #include "lwp.h"
-#include <sys/mman.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
+#include <sys/resource.h> // For getrlimit, struct rlimit, RLIMIT_STACK, and RLIM_INFINITY
+#include <sys/mman.h>     // For mmap and munmap
+#include <unistd.h>       // For sysconf
+#include <stdlib.h>       // For malloc, free
+#include <stdio.h>        // For perror
+#include <string.h>       // For memset
 #include <stdbool.h> // Add this for true
+
+
+
 
 #define LWP_TERM_MASK 0x01 // Assuming LSB indicates termination
 #define LWP_STATUS_MASK 0xFFFFFFFE // Mask to extract the exit status from the rest of the bits
@@ -135,6 +139,23 @@ void lwp_start(void) {
 
 
 tid_t lwp_create(lwpfun function_pointer, void *argument) {
+    // Determine page size
+    long page_size = sysconf(_SC_PAGE_SIZE);
+    
+    // Determine stack size
+    struct rlimit rlim;
+    size_t stack_size;
+    if (getrlimit(RLIMIT_STACK, &rlim) == 0 && rlim.rlim_cur != RLIM_INFINITY) {
+        stack_size = rlim.rlim_cur;
+    } else {
+        stack_size = 8 * 1024 * 1024; // Default to 8 MB
+    }
+    // Ensure stack size is a multiple of page size
+    stack_size = (stack_size + page_size - 1) / page_size * page_size;
+
+    // Log the stack size being used
+    DEBUG_PRINT("LWP Create: Using stack size of %zu bytes\n", stack_size);
+
     // Allocate memory for the thread context
     thread new_thread = malloc(sizeof(context));
     if (!new_thread) {
@@ -142,8 +163,8 @@ tid_t lwp_create(lwpfun function_pointer, void *argument) {
         return NO_THREAD;
     }
 
-    // Allocate memory for the stack
-    new_thread->stack = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    // Allocate memory for the stack using mmap with MAP_STACK flag
+    new_thread->stack = mmap(NULL, stack_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
     if (new_thread->stack == MAP_FAILED) {
         free(new_thread);
         perror("LWP Create: Failed to allocate stack");
@@ -151,13 +172,13 @@ tid_t lwp_create(lwpfun function_pointer, void *argument) {
     }
 
     // Initialize stack size and other thread properties
-    new_thread->stacksize = 4096;
-    new_thread->lib_one = NULL; // Correctly initialize the next pointer
+    new_thread->stacksize = stack_size;
+    new_thread->lib_one = NULL; // Correctly initializes the next pointer
     new_thread->tid = next_tid++;
 
     // Initialize the thread context and stack frame
     memset(&(new_thread->state), 0, sizeof(new_thread->state));
-    unsigned long *stack_ptr = (unsigned long*)new_thread->stack + new_thread->stacksize / sizeof(unsigned long) - 1;
+    unsigned long *stack_ptr = (unsigned long *)new_thread->stack + stack_size / sizeof(unsigned long) - 1;
     *--stack_ptr = (unsigned long)lwp_exit; // Setup for lwp_exit
     *--stack_ptr = (unsigned long)argument; // Argument for the thread function
     *--stack_ptr = (unsigned long)function_pointer; // Thread function pointer
