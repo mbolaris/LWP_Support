@@ -202,33 +202,53 @@ void lwp_start(void) {
     lwp_yield();
 }
 
+static void lwp_wrap(lwpfun fun, void *arg) {
+    int rval;
+    rval = fun(arg);
+    lwp_exit(rval);
+}
+
+
 void setup_thread_start_state(thread new_thread, lwpfun function_pointer, void *argument) {
     // Ensure the stack is aligned to a 16-byte boundary
     unsigned long *stack_top = (unsigned long *)((char *)new_thread->stack + new_thread->stacksize);
+    // Align the stack pointer to 16 bytes. This is crucial for x86-64 ABI compliance.
     stack_top = (unsigned long *)((uintptr_t)stack_top & ~(uintptr_t)0xF);
 
-    // According to the x86-64 ABI, the stack must be aligned to 16 bytes before a call
-    // We are simulating a call, so we align the stack as if a call instruction was executed
-    stack_top -= (stack_top - (unsigned long *)0) % 16 / sizeof(*stack_top);
+    // The x86-64 ABI requires the stack pointer (RSP) to be 16-byte aligned before any CALL instruction.
+    // Since we are simulating a call by manually modifying the stack, we need to ensure this alignment.
+    // The CALL instruction would normally push the return address (next instruction's address) onto the stack,
+    // thereby making RSP 8-byte aligned at the start of the called function. To maintain this convention,
+    // we manually align the stack to 16 bytes here.
 
-    // Prepare the stack as if the thread function was called directly
-    // The return address where the thread function should return
-    // This is set to lwp_exit so the thread can exit cleanly if it returns
-    *(--stack_top) = (unsigned long)lwp_exit;
+    // Adjust for "fake" return address space. This space simulates the address that would be on the stack
+    // if a call instruction were used to start the thread function.
+    stack_top--;
 
-    // The argument for the thread function
+    // Push the argument for the thread function
     *(--stack_top) = (unsigned long)argument;
+
+    // Push the address of the thread function as a "fake" return address.
+    // This is where execution will begin when this thread is switched to.
+    // For simplicity, we assume `lwp_wrap` is being used for all threads.
+    *(--stack_top) = (unsigned long)lwp_wrap;
+
+    // Push a fake return address to simulate a call to `lwp_wrap`.
+    // This can be the address of a function that calls exit or an infinite loop as a safety measure.
+    // For demonstration, we'll just repeat the address of `lwp_wrap`, but in a real system, you might
+    // want a function that gracefully shuts down the thread if it ever "returns".
+    *(--stack_top) = (unsigned long)lwp_exit; // Use lwp_exit as a placeholder.
 
     // Initialize the thread's registers, especially the stack pointer
     memset(&(new_thread->state), 0, sizeof(new_thread->state));
     new_thread->state.rsp = (unsigned long)stack_top;
 
     // Debug logging
-    DEBUG_PRINT("Setup thread start state: Thread ID: %ld, Stack Base: %p, Stack Size: %zu\n",
-                new_thread->tid, new_thread->stack, new_thread->stacksize);
-    DEBUG_PRINT("Setup thread start state: RSP: %lu, RIP: %lu, Argument: %p\n",
-                new_thread->state.rsp, (unsigned long)function_pointer, argument);
+    DEBUG_PRINT("Setup thread start state: Thread ID: %ld, Stack Base: %p, Stack Size: %zu, RSP: %lu\n",
+                new_thread->tid, new_thread->stack, new_thread->stacksize, new_thread->state.rsp);
 }
+
+
 
 
 tid_t lwp_create(lwpfun function_pointer, void *argument) {
@@ -259,24 +279,11 @@ tid_t lwp_create(lwpfun function_pointer, void *argument) {
         return NO_THREAD;
     }
 
-    // Initialize the thread context
-    memset(&(new_thread->state), 0, sizeof(new_thread->state));
     new_thread->stacksize = stack_size;
     new_thread->tid = next_tid++;
 
-    // Prepare the stack
-    unsigned long *stack_top = (unsigned long *)((char *)new_thread->stack + stack_size);
-    stack_top = (unsigned long *)(((uintptr_t)stack_top) & ~0xF); // Align stack pointer to 16-byte
-
-    // Push argument and return address onto the stack
-    *(--stack_top) = (unsigned long)argument; // Place argument on the stack
-    *(--stack_top) = (unsigned long)lwp_exit; // Place return address on the stack
-
-    // Correctly set up fake base pointer to avoid undefined behavior
-    --stack_top; // Decrement stack pointer to make space
-    *stack_top = (unsigned long)(stack_top + 1); // Set fake base pointer for consistency
-
-    new_thread->state.rsp = (unsigned long)stack_top; // Update stack pointer for new thread
+    // Prepare the stack and register state for the new thread
+    setup_thread_start_state(new_thread, function_pointer, argument);
 
     // Admit new thread to the scheduler
     if (current_scheduler && current_scheduler->admit) {
@@ -285,10 +292,11 @@ tid_t lwp_create(lwpfun function_pointer, void *argument) {
         DEBUG_PRINT("No current scheduler set. Thread %ld not admitted.\n", new_thread->tid);
     }
 
-    DEBUG_PRINT("Thread %ld created and admitted with stack base: %p, rsp: %p\n", new_thread->tid, new_thread->stack, (void *)new_thread->state.rsp);
+    DEBUG_PRINT("Thread %ld created and admitted with stack base: %p, rsp: %lu\n", new_thread->tid, new_thread->stack, new_thread->state.rsp);
 
     return new_thread->tid;
 }
+
 
 void lwp_exit(int status) {
     DEBUG_PRINT("Entering lwp_exit. Exiting thread: %ld with status: %d\n", current_thread->tid, status);
