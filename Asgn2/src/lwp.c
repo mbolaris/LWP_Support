@@ -15,6 +15,9 @@
         fflush(stdout);                      \
     } while (0)
 
+#define load_context(c) (swap_rfiles(NULL,c))
+#define save_context(c) (swap_rfiles(c,NULL))
+
 static thread thread_list = NULL;
 static thread current_thread = NULL;
 
@@ -101,6 +104,7 @@ static struct scheduler rr_scheduler = {
 
 static scheduler current_scheduler = &rr_scheduler;
 int thread_count = 0;
+context initial_thread;
 
 static void lwp_wrap(lwpfun fun, void *arg) {
     int rval = fun(arg); // Execute the provided function with arguments
@@ -172,37 +176,23 @@ tid_t lwp_create(lwpfun func, void *arg) {
     return new_thread->tid;
 }
 
-
-thread initial_thread = NULL;
-
 /**
  * Initializes and starts the LWP system, admitting an initial thread.
  */
 
 void lwp_start(void) {
-    initial_thread = malloc(sizeof(context));
-    if (!initial_thread) {
-        perror("Failed to allocate initial thread");
-        return;
-    }
-
     // Initialize the initial thread context
-    initial_thread->tid = 0;
-    initial_thread->stack = NULL;
-    initial_thread->status = LWP_LIVE;
-    initial_thread->stacksize = 0;
-    initial_thread->state.fxsave = FPU_INIT;
+    initial_thread.tid = 0;
+    initial_thread.stack = NULL;
+    initial_thread.status = LWP_LIVE;
+    initial_thread.stacksize = 0;
+    initial_thread.state.fxsave = FPU_INIT;
+    current_thread = &initial_thread;
 
-    // No need to swap files for the initial thread since it uses the main stack
-    // If swap_rfiles is a necessary operation, ensure it's called appropriately here
-
-    // Admit the initial thread to the scheduler and make it the current thread
-//    current_scheduler->admit(initial_thread);
-    current_thread = initial_thread;
-
-    // Yield control to the scheduler to start executing user-created threads
+    save_context(&(initial_thread.state)); // Save the initial thread's context
     lwp_yield();
 }
+
 
 /**
  * Waits for a thread to terminate and cleans up resources.
@@ -246,7 +236,7 @@ tid_t lwp_wait(int *status) {
         }
         
         // If only the initial thread is left, exit the loop.
-        if (current_scheduler->qlen() <= 1) {
+        if (current_scheduler->qlen() == 0) {
             break;
         }
         
@@ -261,22 +251,19 @@ tid_t lwp_wait(int *status) {
  * If no next thread is found, the program will print an error message and exit.
  */
 void lwp_yield(void) {
-    thread prev_thread = current_thread; // Store the current thread for context switching
-    thread next_thread = current_scheduler->next(); // Get the next thread to run
 
+    thread next_thread = current_scheduler->next();
     if (next_thread) {
-        DEBUG_PRINT("Yielding from thread %ld to thread %ld\n", prev_thread->tid, next_thread->tid);
-        current_thread = next_thread; // Update the current thread
-        swap_rfiles(&(prev_thread->state), &(next_thread->state)); // Swap register files (context switch)
+        DEBUG_PRINT("Yielding from thread %ld to thread %ld\n", current_thread->tid, next_thread->tid);
+        thread prev_thread = current_thread;
+        current_thread = next_thread;
+        swap_rfiles(&(prev_thread->state), &(next_thread->state));
     } else {
-        DEBUG_PRINT("No more threads to run, switching back to initial thread\n");
-        if (prev_thread != initial_thread) { // Check to ensure we're not already the initial_thread
-            swap_rfiles(&(prev_thread->state), &(initial_thread->state)); // Correctly switch back to initial_thread
-        }
-        current_thread = initial_thread; // Reset the current thread to the initial thread
+        DEBUG_PRINT("Switching back to initial thread\n");
+        current_thread = &initial_thread;
+        load_context(&(initial_thread.state));
     }
 }
-
 
 /**
  * Terminates the current thread and removes it from the scheduler.
@@ -286,28 +273,20 @@ void lwp_yield(void) {
  */
 void lwp_exit(int status) {
     DEBUG_PRINT("Thread %ld exiting with status %d\n", current_thread->tid, status);
-
-    // Mark the current thread as terminated with the provided status
     current_thread->status = MKTERMSTAT(LWP_TERM, status);
 
-    // Remove the current thread from the scheduler
     current_scheduler->remove(current_thread);
-
-    // Check if there are no more runnable threads
     if (current_scheduler->qlen() == 0) {
-        DEBUG_PRINT("No more threads to run, exiting to initial thread\n");
-        // Ensure we're not trying to switch from initial_thread to itself
-        if (current_thread != initial_thread) {
-            swap_rfiles(&(current_thread->state), &(initial_thread->state)); // Correctly switch back to initial_thread
-        }
-        current_thread = initial_thread;
+        // Last thread has finished; switch back to the initial thread
+        DEBUG_PRINT("Switching back to initial thread\n");
+        current_thread = &initial_thread;
+        load_context(&(initial_thread.state));
     } else {
-        lwp_yield(); // Otherwise, yield to the next runnable thread
+        // Yield to the next thread if there are more threads
+        lwp_yield();
     }
-
-    // If the current thread is the last user thread, program execution should end or return to main context after this
+    // If the initial_thread calls lwp_exit(), simply return to avoid recursion
 }
-
 
 /**
  * Sets the current scheduler to the provided scheduler function and initializes it.
