@@ -1,20 +1,24 @@
 CC      = gcc
-CFLAGS  = -Wall -g -I../include -O0
+CFLAGS  = -Wall -g -I../include 
 LD      = gcc
-LDFLAGS = -Wall -g -L.
+LDFLAGS = -Wall -g -L. -Wl,-rpath=.
 LIBS    = -llwp  # Always link against liblwp.a
+SNAKELIBS = $(LIBS) -lsnakes -lncurses -lrt  # Additional libs for snakes
+
 AS      = gcc  # Use GCC for assembling to leverage the -m64 option
 ASFLAGS = -c -m64  # Correct option for 64-bit
-LWPSRC  = lwp.c  # C source files
-ASMSRC  = magic64.S  # Assembly source files
-LWPOBJ  = $(LWPSRC:.c=.o)  # Convert .c to .o
-ASMOBJ  = $(ASMSRC:.S=.o)  # Convert .S to .o
-OBJECTS = $(LWPOBJ) $(ASMOBJ)  # All object files
+LWPSRC  = lwp.c
+ASMSRC  = magic64.S
+LWPOBJ  = $(LWPSRC:.c=.o)
+ASMOBJ  = $(ASMSRC:.S=.o)
+OBJECTS = $(LWPOBJ) $(ASMOBJ)
 TARGET  = liblwp.a
-PROGS   = nums
+PROGS   = snakes nums hungry
+SNAKEOBJS = randomsnakes.o util.o
+HUNGRYOBJS = hungrysnakes.o util.o
 NUMOBJS = numbersmain.o
 
-.PHONY: all clean nums ns
+.PHONY: all clean nums ns rs hs
 
 all:    $(TARGET) $(PROGS)
 
@@ -24,6 +28,12 @@ $(TARGET): $(OBJECTS)
 nums: $(NUMOBJS) $(TARGET)
 	$(LD) $(LDFLAGS) -o $@ $(NUMOBJS) $(LIBS)
 
+snakes: $(SNAKEOBJS)
+	$(LD) $(LDFLAGS) -o $@ $^ $(SNAKELIBS)
+
+hungry: $(HUNGRYOBJS)
+	$(LD) $(LDFLAGS) -o $@ $^ $(SNAKELIBS)
+
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -31,7 +41,13 @@ nums: $(NUMOBJS) $(TARGET)
 	$(AS) $(ASFLAGS) $< -o $@
 
 clean:
-	rm -f $(OBJECTS) *~ TAGS $(PROGS) $(TARGET)
+    rm -f *.o *~ TAGS $(PROGS) $(TARGET)
 
 ns: nums
 	./nums
+
+rs: snakes
+	./snakes
+
+hs: hungry
+	./hungry
