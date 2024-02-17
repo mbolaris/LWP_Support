@@ -41,7 +41,8 @@ hungry: $(HUNGRYOBJS)
 	$(AS) $(ASFLAGS) $< -o $@
 
 clean:
-    rm -f *.o *~ TAGS $(PROGS) $(TARGET)
+	rm -f *.o *~ TAGS $(PROGS) $(TARGET)
+
 
 ns: nums
 	./nums
