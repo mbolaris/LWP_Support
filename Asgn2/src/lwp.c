@@ -24,6 +24,8 @@ static thread rr_list_head = NULL;
 
 // Admit a new thread into the round-robin list
 static void rr_admit(thread new_thread) {
+
+    DEBUG_PRINT("Admitting thread %ld\n", new_thread->tid);
     if (rr_list_head == NULL) {
         rr_list_head = new_thread;
         new_thread->lib_one = new_thread; // Points to itself, forming a circular list
@@ -58,14 +60,21 @@ static void rr_remove(thread victim) {
 }
 
 // Select the next thread to run from the round-robin list
+// Select the next thread to run from the round-robin list
 static thread rr_next(void) {
-    if (rr_list_head == NULL || rr_list_head->lib_one == rr_list_head) {
-        return NULL; // Return NULL if the list is empty or contains only one thread
+    if (rr_list_head == NULL) {
+        return NULL; // Return NULL if the list is empty
+    }
+    if (rr_list_head->lib_one == rr_list_head) {
+        // If the list contains only one thread, return it without changing the head
+        return rr_list_head;
     }
 
-    rr_list_head = rr_list_head->lib_one; // Rotate the head to simulate round-robin behavior
+    // Rotate the head to simulate round-robin behavior for more than one thread
+    rr_list_head = rr_list_head->lib_one;
     return rr_list_head;
 }
+
 
 // Return the number of threads in the round-robin list
 static int rr_qlen(void) {
@@ -143,9 +152,13 @@ tid_t lwp_create(lwpfun func, void *arg) {
     new_thread->stacksize = stack_size;
     new_thread->stack = (unsigned long *)((char *)stack + stack_size); // Point to the top of the stack
     new_thread->tid = ++thread_count;
-    unsigned long *stack_top = new_thread->stack;
-    *(--stack_top) = (unsigned long)lwp_wrap; // Place lwp_wrap on the stack
-    *(--stack_top) = 0; // Placeholder for the "return address" of lwp_wrap
+    
+    // Before placing lwp_wrap on the stack, align the stack pointer
+    unsigned long *stack_top = (unsigned long *)((char *)stack + stack_size);
+    stack_top = (unsigned long *)((uintptr_t)stack_top & ~0xF); // Align stack pointer to 16 bytes
+    *(--stack_top) = (unsigned long)lwp_wrap; // lwp_wrap address
+    *(--stack_top) = 0; // Placeholder for return address
+
     new_thread->state.rsp = (unsigned long)stack_top;
     new_thread->state.rbp = (unsigned long)stack_top;
     new_thread->state.rdi = (unsigned long)func;
@@ -159,11 +172,15 @@ tid_t lwp_create(lwpfun func, void *arg) {
     return new_thread->tid;
 }
 
+
+thread initial_thread = NULL;
+
 /**
  * Initializes and starts the LWP system, admitting an initial thread.
  */
+
 void lwp_start(void) {
-    thread initial_thread = malloc(sizeof(context));
+    initial_thread = malloc(sizeof(context));
     if (!initial_thread) {
         perror("Failed to allocate initial thread");
         return;
@@ -180,7 +197,7 @@ void lwp_start(void) {
     // If swap_rfiles is a necessary operation, ensure it's called appropriately here
 
     // Admit the initial thread to the scheduler and make it the current thread
-    current_scheduler->admit(initial_thread);
+//    current_scheduler->admit(initial_thread);
     current_thread = initial_thread;
 
     // Yield control to the scheduler to start executing user-created threads
@@ -248,15 +265,18 @@ void lwp_yield(void) {
     thread next_thread = current_scheduler->next(); // Get the next thread to run
 
     if (next_thread) {
+        DEBUG_PRINT("Yielding from thread %ld to thread %ld\n", prev_thread->tid, next_thread->tid);
         current_thread = next_thread; // Update the current thread
         swap_rfiles(&(prev_thread->state), &(next_thread->state)); // Swap register files (context switch)
-        // Optionally, log thread switching for debugging purposes
     } else {
-        // If no next thread is available, log an error and exit
-        fprintf(stderr, "No next thread found, exiting.\n");
-        exit(EXIT_FAILURE); // Use standard exit code for failure
+        DEBUG_PRINT("No more threads to run, switching back to initial thread\n");
+        if (prev_thread != initial_thread) { // Check to ensure we're not already the initial_thread
+            swap_rfiles(&(prev_thread->state), &(initial_thread->state)); // Correctly switch back to initial_thread
+        }
+        current_thread = initial_thread; // Reset the current thread to the initial thread
     }
 }
+
 
 /**
  * Terminates the current thread and removes it from the scheduler.
@@ -265,20 +285,29 @@ void lwp_yield(void) {
  * @param status The exit status to associate with the terminating thread.
  */
 void lwp_exit(int status) {
+    DEBUG_PRINT("Thread %ld exiting with status %d\n", current_thread->tid, status);
+
     // Mark the current thread as terminated with the provided status
     current_thread->status = MKTERMSTAT(LWP_TERM, status);
-    current_scheduler->remove(current_thread); // Remove the current thread from the scheduler
 
-    // Optionally, log thread exit for debugging purposes
-    DEBUG_PRINT("Thread %ld exited with status %d\n", current_thread->tid, status);
+    // Remove the current thread from the scheduler
+    current_scheduler->remove(current_thread);
 
-    // If no more threads are runnable, exit the program
+    // Check if there are no more runnable threads
     if (current_scheduler->qlen() == 0) {
-        exit(EXIT_SUCCESS);
+        DEBUG_PRINT("No more threads to run, exiting to initial thread\n");
+        // Ensure we're not trying to switch from initial_thread to itself
+        if (current_thread != initial_thread) {
+            swap_rfiles(&(current_thread->state), &(initial_thread->state)); // Correctly switch back to initial_thread
+        }
+        current_thread = initial_thread;
     } else {
         lwp_yield(); // Otherwise, yield to the next runnable thread
     }
+
+    // If the current thread is the last user thread, program execution should end or return to main context after this
 }
+
 
 /**
  * Sets the current scheduler to the provided scheduler function and initializes it.
@@ -299,4 +328,15 @@ scheduler lwp_get_scheduler(void) {
     return current_scheduler; // Return the current scheduler
 }
 
-
+thread tid2thread(tid_t tid) {
+    // Search for thread by tid
+    thread t = thread_list;
+    while (t) {
+        if (t->tid == tid) {
+            return t;
+        }
+        t = t->lib_one;
+    }
+    DEBUG_PRINT("LWP tid2thread: Thread %ld not found\n", tid);
+    return NULL;
+}
