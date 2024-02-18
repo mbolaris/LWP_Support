@@ -97,6 +97,7 @@ static struct scheduler rr_scheduler = {
     rr_qlen
 };
 
+
 static scheduler current_scheduler = &rr_scheduler;
 int thread_count = 0;
 context initial_thread;
@@ -196,18 +197,20 @@ void lwp_start(void) {
  */
 tid_t lwp_wait(int *status) {
     // Loop until a terminated thread is found or no more runnable threads exist.
-    while (current_thread) {
- //       DEBUG_PRINT("Waiting for a terminated thread\n");
+    while (true) {
+//        DEBUG_PRINT("Waiting for a terminated thread\n");
 
         thread prev = NULL;
         thread current = current_thread;
         
+        int checked = 0;
+
         while (current != NULL && current_scheduler->qlen() > 1) {
- //           DEBUG_PRINT("Checking thread %ld\n", current->tid);
+//            DEBUG_PRINT("Checking thread %ld\n", current->tid);
 
             // Check if the thread is marked for termination and is not the initial thread.
             if (LWPTERMINATED(current->status) && current->tid != 0) {
- //               DEBUG_PRINT("Thread %ld is terminated\n", current->tid);
+//                DEBUG_PRINT("Thread %ld is terminated\n", current->tid);
 
                 // Remove the terminated thread from the list.
                 if (prev) {
@@ -222,15 +225,22 @@ tid_t lwp_wait(int *status) {
                     *status = LWPTERMSTAT(current->status);
                 }
                 
-            // Deallocate the thread's resources.
-            if (current->stack) {
-//                munmap(current->stack, current->stacksize);
-            }
-            free(current);
+                // Deallocate the thread's resources.
+                if (current->stack) {
+                    current->stack = current->stack - (current->stacksize/sizeof(unsigned long));
+                    munmap(current->stack, current->stacksize); 
+                }
+                free(current);
 
-            return terminated_tid; // Return the ID of the terminated thread.
+                return terminated_tid; // Return the ID of the terminated thread.
             }
             
+            checked++;
+
+            if ((checked % current_scheduler->qlen()) == 0) {
+                lwp_yield();
+            }
+
             prev = current;
             current = current->lib_one; // Move to the next thread in the list.
         }
@@ -255,7 +265,7 @@ void lwp_yield(void) {
 
     thread next_thread = current_scheduler->next();
     int checked = 0;
-    while (checked < current_scheduler->qlen() && (next_thread->tid == 0 || LWPTERMINATED(next_thread->status))) {
+    while (checked < current_scheduler->qlen() && (LWPTERMINATED(next_thread->status))) {
 //        DEBUG_PRINT("Yield skipping thread %ld\n", next_thread->tid);
         next_thread = current_scheduler->next();
         checked++;
@@ -273,10 +283,9 @@ void lwp_yield(void) {
  * @param status The exit status to associate with the terminating thread.
  */
 void lwp_exit(int status) {
-//    DEBUG_PRINT("Thread %ld exiting with status %d\n", current_thread->tid, status);
+//    DEBUG_PRINT("lwp_exit() Thread %ld exiting with status %d\n", current_thread->tid, status);
     current_thread->status = MKTERMSTAT(LWP_TERM, status);
 
-//    current_scheduler->remove(current_thread);
     if (current_thread->tid == 0) {
         // Last thread has finished; switch back to the initial thread
 //        DEBUG_PRINT("Exiting initial thread\n");
@@ -284,7 +293,6 @@ void lwp_exit(int status) {
         // Yield to the next thread if there are more threads
         lwp_yield();
     }
-// If the initial_thread calls lwp_exit(), simply return to avoid recursion
 }
 
 /**
