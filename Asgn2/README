@@ -1,5 +1,8 @@
 Contents of this directory
 
+src:
+	This includes the source code for the LWP library.
+
 demos:
 	This includes a few small programs that use the LWP library.
 	Bear in mind that these are, in fact, fairly gentle on the
