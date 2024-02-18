@@ -188,8 +188,7 @@ void lwp_start(void) {
     initial_thread.stacksize = 0;
     initial_thread.state.fxsave = FPU_INIT;
     current_thread = &initial_thread;
-
-    save_context(&(initial_thread.state)); // Save the initial thread's context
+    current_scheduler->admit(&initial_thread);
     lwp_yield();
 }
 
@@ -203,17 +202,23 @@ void lwp_start(void) {
 tid_t lwp_wait(int *status) {
     // Loop until a terminated thread is found or no more runnable threads exist.
     while (true) {
+        DEBUG_PRINT("Waiting for a terminated thread\n");
+
         thread prev = NULL;
-        thread current = thread_list;
+        thread current = current_thread;
         
-        while (current != NULL) {
+        while (current != NULL && current_scheduler->qlen() > 1) {
+            DEBUG_PRINT("Checking thread %ld\n", current->tid);
+
             // Check if the thread is marked for termination and is not the initial thread.
             if (LWPTERMINATED(current->status) && current->tid != 0) {
+                DEBUG_PRINT("Thread %ld is terminated\n", current->tid);
+
                 // Remove the terminated thread from the list.
                 if (prev) {
                     prev->lib_one = current->lib_one;
                 } else {
-                    thread_list = current->lib_one; // Adjust the head if the first thread is removed.
+                    current_thread = current->lib_one; // Adjust the head if the first thread is removed.
                 }
                 
                 tid_t terminated_tid = current->tid; // Save the terminated thread's ID.
@@ -236,7 +241,7 @@ tid_t lwp_wait(int *status) {
         }
         
         // If only the initial thread is left, exit the loop.
-        if (current_scheduler->qlen() == 0) {
+        if (current_scheduler->qlen() <= 1) {
             break;
         }
         
@@ -253,16 +258,16 @@ tid_t lwp_wait(int *status) {
 void lwp_yield(void) {
 
     thread next_thread = current_scheduler->next();
-    if (next_thread) {
-        DEBUG_PRINT("Yielding from thread %ld to thread %ld\n", current_thread->tid, next_thread->tid);
-        thread prev_thread = current_thread;
-        current_thread = next_thread;
-        swap_rfiles(&(prev_thread->state), &(next_thread->state));
-    } else {
-        DEBUG_PRINT("Switching back to initial thread\n");
-        current_thread = &initial_thread;
-        load_context(&(initial_thread.state));
+    if (current_scheduler->qlen() > 1) {
+        while (next_thread->tid == 0) {
+            DEBUG_PRINT("Skipping initial thread\n");
+            next_thread = current_scheduler->next();
+        } 
     }
+    DEBUG_PRINT("Yielding from thread %ld to thread %ld\n", current_thread->tid, next_thread->tid);
+    thread prev_thread = current_thread;
+    current_thread = next_thread;
+    swap_rfiles(&(prev_thread->state), &(next_thread->state));
 }
 
 /**
@@ -276,11 +281,9 @@ void lwp_exit(int status) {
     current_thread->status = MKTERMSTAT(LWP_TERM, status);
 
     current_scheduler->remove(current_thread);
-    if (current_scheduler->qlen() == 0) {
+    if (current_thread->tid == 0) {
         // Last thread has finished; switch back to the initial thread
-        DEBUG_PRINT("Switching back to initial thread\n");
-        current_thread = &initial_thread;
-        load_context(&(initial_thread.state));
+        DEBUG_PRINT("Exiting initial thread\n");
     } else {
         // Yield to the next thread if there are more threads
         lwp_yield();
